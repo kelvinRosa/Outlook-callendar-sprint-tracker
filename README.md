@@ -5,7 +5,10 @@ And you can add custom events too, usefull to track meetings that you forget to 
 Feel free to contribute and improve the app. 
 
 Instructions:
+You can download the executable from the releases.
+
+Instructions if you want to modify and build:
 'pip install pyinstaller tkcalendar icalendar pytz requests python-dateutil'
 
 build: 
-'pyinstaller --noconfirm --onefile --windowed app.py'    
+'pyinstaller --noconfirm --onefile --windowed app.py' 
