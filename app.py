@@ -10,6 +10,9 @@ import json
 from tkcalendar import DateEntry
 import csv
 from tkinter.filedialog import asksaveasfilename
+from tkinter.filedialog import askopenfilename
+from openpyxl import Workbook
+from openpyxl.utils import get_column_letter
 
 class CalendarTrackerApp:
     def __init__(self, root):
@@ -33,6 +36,69 @@ class CalendarTrackerApp:
         self.carregar_config()
         self.carregar_minutos_excedentes()
         self.carregar_eventos_locais()
+
+    def importar_arquivo_ics(self):
+        filepath = askopenfilename(
+            filetypes=[("Arquivo ICS", "*.ics"), ("Todos os arquivos", "*.*")],
+            title="Selecionar arquivo ICS"
+        )
+
+        if not filepath:
+            return  # usuário cancelou
+
+        try:
+            with open(filepath, 'rb') as f:
+                ics_data = f.read()
+
+            calendario = Calendar.from_ical(ics_data)
+
+            if self.two_weeks_var.get():
+                data_inicio = self.date_picker.get_date()
+                data_fim = data_inicio + timedelta(days=13)
+            else:
+                data_inicio = self.date_picker.get_date()
+                data_fim = self.end_date_picker.get_date()
+
+            # Limpar interface
+            for widget in self.scrollable_frame.winfo_children():
+                widget.destroy()
+
+            self.check_vars = []
+            self.eventos_atuais = []
+
+            eventos_calendario = self.processar_calendario(calendario, data_inicio, data_fim)
+            eventos_calendario = self.aplicar_filtros(eventos_calendario)
+            self.eventos_atuais.extend(eventos_calendario)
+
+            # Carregar eventos locais dentro do período
+            eventos_locais_periodo = [
+                e for e in self.local_events if data_inicio <= e['start'].date() <= data_fim
+            ]
+
+            self.salvar_config()
+
+            for inicio, fim, descricao in sorted(eventos_calendario, key=lambda x: x[0]):
+                inicio_br = inicio.astimezone(self.tz_brasil)
+                event_key = f"{inicio_br.strftime('%Y%m%d%H%M')}_{descricao}"
+                excess_min = self.excess_minutes.get(event_key, 0)
+                self.adicionar_evento_na_interface(inicio, fim, descricao, False, excess_min)
+
+            for event in sorted(eventos_locais_periodo, key=lambda x: x['start']):
+                self.adicionar_evento_na_interface(
+                    event['start'],
+                    event['end'],
+                    event['description'],
+                    True,
+                    event.get('excess_minutes', 0)
+                )
+
+            self.calcular_total()
+            self.atualizar_tarefas_visiveis()
+
+            messagebox.showinfo("Sucesso", "Arquivo ICS importado e eventos carregados.")
+
+        except Exception as e:
+            messagebox.showerror("Erro", f"Falha ao importar arquivo ICS:\n{str(e)}")
 
     def carregar_minutos_excedentes(self):
         """Carrega os minutos excedentes salvos anteriormente"""
@@ -175,77 +241,68 @@ class CalendarTrackerApp:
         ttk.Button(dialog, text="Salvar", command=salvar_evento).grid(row=4, column=1, padx=5, pady=10, sticky=tk.E)
         ttk.Button(dialog, text="Cancelar", command=dialog.destroy).grid(row=4, column=2, padx=5, pady=10, sticky=tk.W)
 
+    
+
     def exportar_excel(self):
         if not self.eventos_atuais and not self.local_events:
             messagebox.showwarning("Aviso", "Não há eventos para exportar")
             return
-        
-        # Obter os eventos selecionados
-        eventos_selecionados = []
-        for i, frame in enumerate(self.scrollable_frame.winfo_children()):
-            if hasattr(frame, 'event_data'):
-                for widget in frame.winfo_children():
-                    if isinstance(widget, ttk.Checkbutton):
-                        if widget.instate(['selected']):
-                            inicio, fim, descricao = frame.event_data
-                            # Obter minutos excedentes do Spinbox
-                            excess_min = int(frame.excess_spin.get())
-                            eventos_selecionados.append((inicio, fim, descricao, excess_min, False))  # False indica que não é evento local
-                        break
-        
-        # Adicionar eventos locais selecionados
-        for i, frame in enumerate(self.scrollable_frame.winfo_children()):
-            if hasattr(frame, 'local_event_data'):
-                for widget in frame.winfo_children():
-                    if isinstance(widget, ttk.Checkbutton):
-                        if widget.instate(['selected']):
-                            event_data = frame.local_event_data
-                            eventos_selecionados.append((
-                                event_data['start'],
-                                event_data['end'],
-                                event_data['description'],
-                                event_data['excess_minutes'],
-                                True  # True indica que é evento local
-                            ))
-                        break
-        
-        if not eventos_selecionados:
-            messagebox.showwarning("Aviso", "Nenhum evento selecionado para exportar")
-            return
-        
-        # Pedir ao usuário onde salvar o arquivo
+
         filepath = asksaveasfilename(
             defaultextension=".csv",
             filetypes=[("Arquivo CSV", "*.csv"), ("Todos os arquivos", "*.*")],
             title="Salvar como"
         )
-        
-        if not filepath:  # Usuário cancelou
+
+        if not filepath:
             return
-        
+
         try:
             with open(filepath, 'w', newline='', encoding='utf-8') as csvfile:
                 writer = csv.writer(csvfile, delimiter=';')
-                # Escrever cabeçalho
+
+                # --------- Parte 1: Eventos ---------
                 writer.writerow([
                     "Data", 
                     "Hora Início", 
                     "Hora Fim", 
                     "Duração (minutos)", 
-                    "Minutos Excedentes",
+                    "Excedidos",
                     "Duração Total",
                     "Descrição",
                     "Tipo (Local/Calendário)"
                 ])
-                
-                # Escrever dados
+
+                eventos_selecionados = []
+
+                for frame in self.scrollable_frame.winfo_children():
+                    if hasattr(frame, 'event_data'):
+                        for widget in frame.winfo_children():
+                            if isinstance(widget, ttk.Checkbutton) and widget.instate(['selected']):
+                                inicio, fim, descricao = frame.event_data
+                                excess_min = int(frame.excess_spin.get())
+                                eventos_selecionados.append((inicio, fim, descricao, excess_min, False))
+                                break
+                    elif hasattr(frame, 'local_event_data'):
+                        for widget in frame.winfo_children():
+                            if isinstance(widget, ttk.Checkbutton) and widget.instate(['selected']):
+                                event_data = frame.local_event_data
+                                eventos_selecionados.append((
+                                    event_data['start'],
+                                    event_data['end'],
+                                    event_data['description'],
+                                    event_data['excess_minutes'],
+                                    True
+                                ))
+                                break
+
                 for inicio, fim, descricao, excess_min, is_local in sorted(eventos_selecionados, key=lambda x: x[0]):
-                    inicio_br = inicio.astimezone(self.tz_brasil) if not is_local else inicio
-                    fim_br = fim.astimezone(self.tz_brasil) if not is_local else fim
-                    
+                    inicio_br = self.to_naive_local(inicio)
+                    fim_br = self.to_naive_local(fim)
+
                     duracao = int((fim - inicio).total_seconds() / 60)
                     duracao_total = duracao + excess_min
-                    
+
                     writer.writerow([
                         inicio_br.strftime('%Y-%m-%d'),
                         inicio_br.strftime('%H:%M'),
@@ -256,61 +313,177 @@ class CalendarTrackerApp:
                         descricao,
                         "Local" if is_local else "Calendário"
                     ])
-            
-            messagebox.showinfo("Sucesso", f"Eventos exportados com sucesso para:\n{filepath}")
+
+                # --------- Linha em branco + cabeçalho de tarefas ---------
+                writer.writerow([])
+                writer.writerow(["Tarefas da Sprint"])
+                writer.writerow(["Data", "Tarefa"])
+
+                if self.two_weeks_var.get():
+                    data_inicio = self.date_picker.get_date()
+                    data_fim = data_inicio + timedelta(days=13)
+                else:
+                    data_inicio = self.date_picker.get_date()
+                    data_fim = self.end_date_picker.get_date()
+
+                for tarefa, data_str in self.tarefas_data.items():
+                    try:
+                        data = datetime.strptime(data_str, "%Y-%m-%d").date()
+                        if data_inicio <= data <= data_fim:
+                            writer.writerow([data_str, tarefa])
+                    except Exception as e:
+                        print(f"Erro ao exportar tarefa '{tarefa}': {e}")
+
+            messagebox.showinfo("Sucesso", f"Eventos e tarefas exportados com sucesso para:\n{filepath}")
+
         except Exception as e:
             messagebox.showerror("Erro", f"Falha ao exportar:\n{str(e)}")
 
+    def to_naive_local(self, dt):
+        if dt.tzinfo is not None:
+            return dt.astimezone(self.tz_brasil).replace(tzinfo=None)
+        return dt
+    
+    def toggle_end_date(self):
+        if self.two_weeks_var.get():
+            self.end_date_label.grid_remove()
+            self.end_date_picker.grid_remove()
+        else:
+            self.end_date_label.grid()
+            self.end_date_picker.grid()
+
+    def atualizar_tarefas_visiveis(self):
+        self.task_listbox.delete(0, tk.END)
+        if self.two_weeks_var.get():
+            data_inicio = self.date_picker.get_date()
+            data_fim = data_inicio + timedelta(days=13)
+        else:
+            data_inicio = self.date_picker.get_date()
+            data_fim = self.end_date_picker.get_date()
+
+        for tarefa, data_str in self.tarefas_data.items():
+            try:
+                data_tarefa = datetime.strptime(data_str, '%Y-%m-%d').date()
+                if data_inicio <= data_tarefa <= data_fim:
+                    self.task_listbox.insert(tk.END, tarefa)
+            except Exception as e:
+                print(f"Erro ao verificar tarefa '{tarefa}': {e}")
+
+    def adicionar_tarefa(self):
+        tarefa = self.task_entry.get().strip()
+        if tarefa:
+            hoje_str = date.today().isoformat()
+            self.tarefas_data[tarefa] = hoje_str
+            self.task_listbox.insert(tk.END, tarefa)
+            self.task_entry.delete(0, tk.END)
+            self.salvar_tarefas()
+
+    def salvar_tarefas(self):
+        tarefas = []
+        for i in range(self.task_listbox.size()):
+            texto = self.task_listbox.get(i)
+            data = self.tarefas_data.get(texto, date.today().isoformat())
+            tarefas.append({"text": texto, "date": data})
+        with open(self.task_file, 'w', encoding='utf-8') as f:
+            json.dump(tarefas, f, ensure_ascii=False, indent=2)
+
+    def carregar_tarefas(self):
+        self.tarefas_data = {}
+        if os.path.exists(self.task_file):
+            try:
+                with open(self.task_file, 'r', encoding='utf-8') as f:
+                    tarefas = json.load(f)
+                    for t in tarefas:
+                        self.tarefas_data[t["text"]] = t["date"]
+            except Exception as e:
+                print(f"Erro ao carregar tarefas: {e}")
+
+
     def setup_ui(self):
-        # Frame principal
-        mainframe = ttk.Frame(self.root, padding="10")
+        self.tabs = ttk.Notebook(self.root)
+        self.tabs.pack(fill='both', expand=True)
+
+        # Aba principal (eventos)
+        self.main_tab = ttk.Frame(self.tabs)
+        self.tabs.add(self.main_tab, text="Meetings")
+
+        mainframe = ttk.Frame(self.main_tab, padding="10")
         mainframe.pack(fill=tk.BOTH, expand=True)
-        
+
         # Controles superiores
         ttk.Label(mainframe, text="URL do calendário (.ics):").grid(row=0, column=0, sticky=tk.W)
         self.url_entry = ttk.Entry(mainframe, width=50)
-        self.url_entry.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=5, pady=5)
+        self.url_entry.grid(row=0, column=1, columnspan=4, sticky=(tk.W, tk.E), padx=5, pady=5)
         
+
         ttk.Label(mainframe, text="Data de início da sprint:").grid(row=1, column=0, sticky=tk.W)
         self.date_picker = DateEntry(mainframe, date_pattern='yyyy-mm-dd')
         self.date_picker.grid(row=1, column=1, sticky=tk.W, padx=5, pady=5)
-        
+
+        self.two_weeks_var = tk.BooleanVar(value=True)
+        self.two_weeks_check = ttk.Checkbutton(mainframe, text="Sprint de 2 Semanas", variable=self.two_weeks_var, command=self.toggle_end_date)
+        self.two_weeks_check.grid(row=1, column=2, sticky=tk.W, padx=5)
+
+        self.end_date_label = ttk.Label(mainframe, text="Data de fim da sprint:")
+        self.end_date_picker = DateEntry(mainframe, date_pattern='yyyy-mm-dd')
+        self.end_date_label.grid(row=1, column=3, sticky=tk.W)
+        self.end_date_picker.grid(row=1, column=4, sticky=tk.W)
+        self.toggle_end_date()
+
         # Botões
         button_frame = ttk.Frame(mainframe)
-        button_frame.grid(row=2, column=0, columnspan=3, pady=10, sticky=tk.W)
-        
-        ttk.Button(button_frame, text="Carregar Eventos", command=self.carregar_eventos).pack(side=tk.LEFT, padx=5)
-        ttk.Button(button_frame, text="Exportar para Excel", command=self.exportar_excel).pack(side=tk.LEFT, padx=5)
+        button_frame.grid(row=2, column=0, columnspan=5, pady=10, sticky=tk.W)
+
+        ttk.Button(button_frame, text="Carregar de arquivo ICS", command=self.importar_arquivo_ics).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Carregar dar Url", command=self.carregar_eventos).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="+ Adicionar Evento Local", command=self.adicionar_evento_local).pack(side=tk.LEFT, padx=5)
-        
+        ttk.Button(button_frame, text="Exportar CSV", command=self.exportar_excel).pack(side=tk.LEFT, padx=5)
+
         # Resultado
         self.resultado_label = ttk.Label(mainframe, text="Tempo total: 0h00m | Minutos excedentes: 0 | Eventos selecionados: 0")
-        self.resultado_label.grid(row=3, column=0, columnspan=2, pady=5)
-        
-        # Lista de eventos com checkboxes
+        self.resultado_label.grid(row=3, column=0, columnspan=5, pady=5)
+
+        # Lista de eventos com scroll
         self.container = ttk.Frame(mainframe)
-        self.container.grid(row=4, column=0, columnspan=2, sticky='nsew')
-        
+        self.container.grid(row=4, column=0, columnspan=5, sticky='nsew')
+
         self.canvas = tk.Canvas(self.container, borderwidth=0, highlightthickness=0)
         self.scrollbar = ttk.Scrollbar(self.container, orient="vertical", command=self.canvas.yview)
         self.scrollable_frame = ttk.Frame(self.canvas)
-        
+
         self.scrollable_frame.bind(
             "<Configure>",
             lambda e: self.canvas.configure(
                 scrollregion=self.canvas.bbox("all")
             )
         )
-        
+
         self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
         self.canvas.configure(yscrollcommand=self.scrollbar.set)
-        
+
         self.canvas.pack(side="left", fill="both", expand=True)
         self.scrollbar.pack(side="right", fill="y")
-        
+
         # Configurar pesos da grade
         mainframe.columnconfigure(1, weight=1)
         mainframe.rowconfigure(4, weight=1)
+
+        # Aba de tarefas
+        self.task_tab = ttk.Frame(self.tabs)
+        self.tabs.add(self.task_tab, text="Entregas da Sprint")
+
+        self.task_entry = ttk.Entry(self.task_tab, width=60)
+        self.task_entry.pack(padx=10, pady=(10, 0), anchor="w")
+
+        self.task_add_btn = ttk.Button(self.task_tab, text="Adicionar Entrega", command=self.adicionar_tarefa)
+        self.task_add_btn.pack(padx=10, pady=5, anchor="w")
+
+        self.task_listbox = tk.Listbox(self.task_tab, width=80, height=15)
+        self.task_listbox.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+
+        self.task_file = "sprint_tasks.json"
+        self.carregar_tarefas()
+
     
     def carregar_config(self):
         if os.path.exists(self.config_file):
@@ -338,7 +511,10 @@ class CalendarTrackerApp:
         url = self.url_entry.get().strip()
         try:
             data_inicio = self.date_picker.get_date()
-            data_fim = data_inicio + timedelta(days=13)  # 14 dias (incluindo o dia inicial)
+            if self.two_weeks_var.get():
+                data_fim = data_inicio + timedelta(days=13)
+            else:
+                data_fim = self.end_date_picker.get_date()
         except Exception as e:
             messagebox.showerror("Erro", f"Data inválida: {str(e)}")
             return
@@ -395,6 +571,7 @@ class CalendarTrackerApp:
             )
         
         self.calcular_total()
+        self.atualizar_tarefas_visiveis()
     
     def adicionar_evento_na_interface(self, inicio, fim, descricao, is_local, excess_minutes=0):
         """Adiciona um evento à interface, seja do calendário ou local"""
@@ -703,7 +880,26 @@ class CalendarTrackerApp:
         else:
             excess_str = f"{excess_mins}m"
         
-        self.resultado_label.config(text=f"Tempo total: {total_str} | Minutos excedentes: {excess_str} | Eventos selecionados: {eventos_selecionados}")
+        # Tempo previsto
+        horas = total_minutos // 60
+        minutos = total_minutos % 60
+        tempo_previsto_str = f"{horas}h{minutos:02d}m" if horas > 0 else f"{minutos}m"
+
+        # Excedidos
+        excess_horas = total_excess // 60
+        excess_mins = total_excess % 60
+        excedidos_str = f"{excess_horas}h{excess_mins:02d}m" if excess_horas > 0 else f"{excess_mins}m"
+
+        # Total final
+        total_final = total_minutos + total_excess
+        final_horas = total_final // 60
+        final_mins = total_final % 60
+        tempo_total_str = f"{final_horas}h{final_mins:02d}m" if final_horas > 0 else f"{final_mins}m"
+
+        self.resultado_label.config(
+            text=f"Tempo previsto: {tempo_previsto_str} | Excedidos: {excedidos_str} | Tempo Total: {tempo_total_str}"
+        )
+
 
 if __name__ == "__main__":
     root = tk.Tk()
