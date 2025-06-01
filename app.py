@@ -243,7 +243,7 @@ class CalendarTrackerApp:
 
     
 
-    def exportar_excel(self):
+    def exportar_csv(self):
         if not self.eventos_atuais and not self.local_events:
             messagebox.showwarning("Aviso", "Não há eventos para exportar")
             return
@@ -278,14 +278,14 @@ class CalendarTrackerApp:
                 for frame in self.scrollable_frame.winfo_children():
                     if hasattr(frame, 'event_data'):
                         for widget in frame.winfo_children():
-                            if isinstance(widget, ttk.Checkbutton) and widget.instate(['selected']):
+                            if isinstance(widget, ttk.Checkbutton) and frame.check_var.get() == 1:
                                 inicio, fim, descricao = frame.event_data
                                 excess_min = int(frame.excess_spin.get())
                                 eventos_selecionados.append((inicio, fim, descricao, excess_min, False))
                                 break
                     elif hasattr(frame, 'local_event_data'):
                         for widget in frame.winfo_children():
-                            if isinstance(widget, ttk.Checkbutton) and widget.instate(['selected']):
+                            if isinstance(widget, ttk.Checkbutton) and frame.check_var.get() == 1:
                                 event_data = frame.local_event_data
                                 eventos_selecionados.append((
                                     event_data['start'],
@@ -296,17 +296,19 @@ class CalendarTrackerApp:
                                 ))
                                 break
 
-                for inicio, fim, descricao, excess_min, is_local in sorted(eventos_selecionados, key=lambda x: x[0]):
-                    inicio_br = self.to_naive_local(inicio)
-                    fim_br = self.to_naive_local(fim)
+                eventos_selecionados.sort(key=lambda x: self.to_naive_local(x[0]))                
+                for inicio, fim, descricao, excess_min, is_local in eventos_selecionados:
+                    print(f"[DEBUG] {descricao} - inicio: {inicio} ({inicio.tzinfo}), fim: {fim} ({fim.tzinfo})")
+                    inicio_naive = self.to_naive_local(inicio)
+                    fim_naive = self.to_naive_local(fim)
 
-                    duracao = int((fim - inicio).total_seconds() / 60)
+                    duracao = int((fim_naive - inicio_naive).total_seconds() / 60)
                     duracao_total = duracao + excess_min
 
                     writer.writerow([
-                        inicio_br.strftime('%Y-%m-%d'),
-                        inicio_br.strftime('%H:%M'),
-                        fim_br.strftime('%H:%M'),
+                        inicio_naive.strftime('%Y-%m-%d'),
+                        inicio_naive.strftime('%H:%M'),
+                        fim_naive.strftime('%H:%M'),
                         str(duracao),
                         str(excess_min),
                         str(duracao_total),
@@ -316,15 +318,12 @@ class CalendarTrackerApp:
 
                 # --------- Linha em branco + cabeçalho de tarefas ---------
                 writer.writerow([])
-                writer.writerow(["Tarefas da Sprint"])
+                writer.writerow(["Entregas da Sprint"])
                 writer.writerow(["Data", "Tarefa"])
 
-                if self.two_weeks_var.get():
-                    data_inicio = self.date_picker.get_date()
-                    data_fim = data_inicio + timedelta(days=13)
-                else:
-                    data_inicio = self.date_picker.get_date()
-                    data_fim = self.end_date_picker.get_date()
+                data_inicio = self.date_picker.get_date()
+                data_fim = data_inicio + timedelta(days=13) if self.two_weeks_var.get() else self.end_date_picker.get_date()
+
 
                 for tarefa, data_str in self.tarefas_data.items():
                     try:
@@ -334,15 +333,20 @@ class CalendarTrackerApp:
                     except Exception as e:
                         print(f"Erro ao exportar tarefa '{tarefa}': {e}")
 
-            messagebox.showinfo("Sucesso", f"Eventos e tarefas exportados com sucesso para:\n{filepath}")
+            messagebox.showinfo("Sucesso", f"Eventos e entregas exportados com sucesso para:\n{filepath}")
 
         except Exception as e:
             messagebox.showerror("Erro", f"Falha ao exportar:\n{str(e)}")
 
     def to_naive_local(self, dt):
-        if dt.tzinfo is not None:
-            return dt.astimezone(self.tz_brasil).replace(tzinfo=None)
-        return dt
+        if isinstance(dt, datetime):
+            if dt.tzinfo is not None:
+                return dt.astimezone(self.tz_brasil).replace(tzinfo=None)
+            return dt
+        elif isinstance(dt, date):
+            return datetime.combine(dt, datetime.min.time())
+        else:
+            raise TypeError(f"Esperado datetime/date, recebido: {type(dt)}")
     
     def toggle_end_date(self):
         if self.two_weeks_var.get():
@@ -396,7 +400,7 @@ class CalendarTrackerApp:
                     for t in tarefas:
                         self.tarefas_data[t["text"]] = t["date"]
             except Exception as e:
-                print(f"Erro ao carregar tarefas: {e}")
+                print(f"Erro ao carregar entregas: {e}")
 
 
     def setup_ui(self):
@@ -437,7 +441,7 @@ class CalendarTrackerApp:
         ttk.Button(button_frame, text="Carregar de arquivo ICS", command=self.importar_arquivo_ics).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="Carregar dar Url", command=self.carregar_eventos).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="+ Adicionar Evento Local", command=self.adicionar_evento_local).pack(side=tk.LEFT, padx=5)
-        ttk.Button(button_frame, text="Exportar CSV", command=self.exportar_excel).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Exportar CSV", command=self.exportar_csv).pack(side=tk.LEFT, padx=5)
 
         # Resultado
         self.resultado_label = ttk.Label(mainframe, text="Tempo total: 0h00m | Minutos excedentes: 0 | Eventos selecionados: 0")
@@ -616,6 +620,8 @@ class CalendarTrackerApp:
         # Checkbox
         cb = ttk.Checkbutton(frame, variable=var, command=self.calcular_total)
         cb.pack(side='left')
+
+        frame.check_var = var
         
         # Ícone para identificar eventos locais
         if is_local:
